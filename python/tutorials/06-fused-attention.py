@@ -566,23 +566,20 @@ try:
 except BaseException:
     HAS_FLASH = False
 
-TORCH_HAS_FP8 = hasattr(torch, 'float8_e5m2')
-BATCH, N_HEADS, HEAD_DIM = 4, 32, 64
+TORCH_HAS_FP8 = False
+BATCH, N_HEADS, HEAD_DIM = 4, 32, 128
 # vary seq length for fixed head and batch=4
 configs = []
-for mode in ["fwd", "bwd"]:
-    for causal in [True, False]:
-        if mode == "bwd" and not causal:
-            continue
+for mode in ["fwd"]:
+    for causal in [False]:
         configs.append(
             triton.testing.Benchmark(
                 x_names=["N_CTX"],
                 x_vals=[2**i for i in range(10, 15)],
                 line_arg="provider",
-                line_vals=["triton-fp16"] + (["triton-fp8"] if TORCH_HAS_FP8 else []) +
+                line_vals=["triton-fp16"] +
                 (["flash"] if HAS_FLASH else []),
-                line_names=["Triton [FP16]"] + (["Triton [FP8]"] if TORCH_HAS_FP8 else []) +
-                (["Flash-2"] if HAS_FLASH else []),
+                line_names=["Triton [FP16]"] +  (["Flash-2"] if HAS_FLASH else []),
                 styles=[("red", "-"), ("blue", "-"), ("green", "-")],
                 ylabel="ms",
                 plot_name=f"fused-attention-batch{BATCH}-head{N_HEADS}-d{HEAD_DIM}-{mode}-causal={causal}",
@@ -638,4 +635,4 @@ def bench_flash_attention(BATCH, H, N_CTX, HEAD_DIM, causal, mode, provider, dev
 
 if __name__ == "__main__":
     # only works on post-Ampere GPUs right now
-    bench_flash_attention.run(save_path=".", print_data=True)
+    bench_flash_attention.run(print_data=True)
