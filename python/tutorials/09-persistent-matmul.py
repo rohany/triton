@@ -411,7 +411,7 @@ def matmul_kernel_device_tma_persistent(workspace_ptr,  #
 
     num_pid_in_group = GROUP_SIZE_M * num_pid_n
 
-    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float16)
 
     for _ in range(0, k_tiles * tiles_per_SM):
         ki = tl.where(ki == k_tiles - 1, 0, ki + 1)
@@ -451,7 +451,7 @@ def matmul_kernel_device_tma_persistent(workspace_ptr,  #
 
         a = tl._experimental_descriptor_load(a_desc_ptr, [offs_am, offs_k], [BLOCK_SIZE_M, BLOCK_SIZE_K], dtype)
         b = tl._experimental_descriptor_load(b_desc_ptr, [offs_bn, offs_k], [BLOCK_SIZE_N, BLOCK_SIZE_K], dtype)
-        accumulator = tl.dot(a, b.T, accumulator)
+        accumulator = tl.dot(a, b.T, accumulator, out_dtype=tl.float16)
 
         if ki == k_tiles - 1:
             c = accumulator.to(dtype)

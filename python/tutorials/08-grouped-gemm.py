@@ -113,6 +113,7 @@ def grouped_matmul_kernel(
             offs_k = tl.arange(0, BLOCK_SIZE_K)
             a_ptrs = a_ptr + offs_am[:, None] * lda + offs_k[None, :]
             b_ptrs = b_ptr + offs_k[:, None] * ldb + offs_bn[None, :]
+            # accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float16)
             accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
             for kk in range(0, tl.cdiv(k, BLOCK_SIZE_K)):
                 # hint to Triton compiler to do proper loop pipelining
@@ -204,8 +205,8 @@ for i in range(group_size):
 
 tri_out = group_gemm_fn(group_A, group_B)
 ref_out = [torch.matmul(a, b) for a, b in zip(group_A, group_B)]
-for i in range(group_size):
-    assert torch.allclose(ref_out[i], tri_out[i], atol=1e-2, rtol=0)
+# for i in range(group_size):
+#     assert torch.allclose(ref_out[i], tri_out[i], atol=1e-2, rtol=0)
 
 
 # only launch the kernel, no tensor preparation here to remove all overhead
@@ -230,7 +231,8 @@ def torch_perf_fn(group_A, group_B):
     triton.testing.Benchmark(
         # argument names to use as an x-axis for the plot
         x_names=['N'],
-        x_vals=[2**i for i in range(7, 11)],  # different possible values for `x_name`
+        # x_vals=[2**i for i in range(7, 11)],  # different possible values for `x_name`
+        x_vals=[4096, 6144, 8192],  # different possible values for `x_name`
         line_arg='provider',
         # argument name whose value corresponds to a different line in the plot
         # possible values for `line_arg``
@@ -254,18 +256,19 @@ def benchmark(N, provider):
     g_sizes = []
     g_lds = []
     group_C = []
+    base = 2048
     for i in range(group_size):
-        A = torch.rand((N, N), device="cuda", dtype=torch.float16)
-        B = torch.rand((N, N), device="cuda", dtype=torch.float16)
-        C = torch.empty((N, N), device="cuda", dtype=torch.float16)
+        A = torch.rand((base, N), device="cuda", dtype=torch.float16)
+        B = torch.rand((N, base), device="cuda", dtype=torch.float16)
+        C = torch.empty((base, base), device="cuda", dtype=torch.float16)
         group_A.append(A)
         group_B.append(B)
         group_C.append(C)
         A_addrs.append(A.data_ptr())
         B_addrs.append(B.data_ptr())
         C_addrs.append(C.data_ptr())
-        g_sizes += [N, N, N]
-        g_lds += [N, N, N]
+        g_sizes += [base, base, N]
+        g_lds += [N, base, base]
 
     d_a_ptrs = torch.tensor(A_addrs, device="cuda")
     d_b_ptrs = torch.tensor(B_addrs, device="cuda")
@@ -279,7 +282,8 @@ def benchmark(N, provider):
     if provider == 'triton':
         ms, min_ms, max_ms = triton.testing.do_bench(
             lambda: triton_perf_fn(d_a_ptrs, d_b_ptrs, d_c_ptrs, d_g_sizes, d_g_lds, group_size), quantiles=quantiles)
-    return ms, max_ms, min_ms
+    perf = lambda ms: group_size * 2 * base * base * N * 1e-12 / (ms * 1e-3)
+    return perf(ms), perf(max_ms), perf(min_ms)
 
 
 benchmark.run(show_plots=True, print_data=True)

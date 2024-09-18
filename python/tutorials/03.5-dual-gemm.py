@@ -291,8 +291,10 @@ def matmul_kernel(
     # We accumulate into a `[BLOCK_SIZE_M, BLOCK_SIZE_N]` block
     # of fp32 values for higher accuracy.
     # `accumulator` will be converted back to fp16 after the loop.
-    acc1 = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float16)
-    acc2 = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float16)
+    # acc1 = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float16)
+    # acc2 = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float16)
+    acc1 = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+    acc2 = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
         # Load the next block of A and B, generate a mask by checking the K dimension.
         # If it is out of bounds, set it to 0.
@@ -300,13 +302,15 @@ def matmul_kernel(
         b1 = tl.load(b1_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
         b2 = tl.load(b2_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
         # We accumulate along the K dimension.
-        acc1 = tl.dot(a, b1, acc=acc1, out_dtype=tl.float16)
-        acc2 = tl.dot(a, b2, acc=acc2, out_dtype=tl.float16)
+        # acc1 = tl.dot(a, b1, acc=acc1, out_dtype=tl.float16)
+        # acc2 = tl.dot(a, b2, acc=acc2, out_dtype=tl.float16)
+        acc1 = tl.dot(a, b1, acc=acc1)
+        acc2 = tl.dot(a, b2, acc=acc2)
         # Advance the ptrs to the next K block.
         a_ptrs += BLOCK_SIZE_K * stride_ak
         b1_ptrs += BLOCK_SIZE_K * stride_bk
         b2_ptrs += BLOCK_SIZE_K * stride_bk
-    c = acc1 + acc2
+    c = (acc1 + acc2).to(tl.float16)
 
     # -----------------------------------------------------------
     # Write back the block of the output matrix C with masks.
@@ -384,7 +388,8 @@ for fp8_inputs in [False]:
     configs.append(
         triton.testing.Benchmark(
             x_names=["M", "N", "K"],  # Argument names to use as an x-axis for the plot
-            x_vals=[128 * i for i in range(2, 33)],  # Different possible values for `x_name`
+            # x_vals=[128 * i for i in range(2, 33)],  # Different possible values for `x_name`
+            x_vals=[4096, 6144, 8192],  # Different possible values for `x_name`
             line_arg="provider",  # Argument name whose value corresponds to a different line in the plot
             # Possible values for `line_arg`
             # Don't compare to cublas for fp8 cases as torch.matmul doesn't support fp8 at the moment.
@@ -408,7 +413,7 @@ def benchmark(M, N, K, provider, fp8_inputs):
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: torch.matmul(a, b), quantiles=quantiles)
     if provider == 'triton':
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: matmul(a, b1, b2), quantiles=quantiles)
-    perf = lambda ms: 2 * M * N * K * 1e-12 / (ms * 1e-3)
+    perf = lambda ms: (2 * 2 * M * N * K + M * N) * 1e-12 / (ms * 1e-3)
     return perf(ms), perf(max_ms), perf(min_ms)
 
 
