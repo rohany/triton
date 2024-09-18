@@ -249,9 +249,9 @@ def matmul_kernel(
         # The stride variables represent how much to increase the ptr by when moving by 1
         # element in a particular dimension. E.g. `stride_am` is how much to increase `a_ptr`
         # by to get the element one row down (A has M rows).
-        stride_am, stride_ak,  #
-        stride_bk, stride_bn,  #
-        stride_cm, stride_cn,
+        stride_al, stride_am, stride_ak,  #
+        stride_bl, stride_bk, stride_bn,  #
+        stride_cl, stride_cm, stride_cn,
         # Meta-parameters
         BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,  #
         GROUP_SIZE_M: tl.constexpr,  #
@@ -274,6 +274,8 @@ def matmul_kernel(
     pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
     pid_n = (pid % num_pid_in_group) // group_size_m
 
+    bid = tl.program_id(axis=1)
+
     # ----------------------------------------------------------
     # Create pointers for the first blocks of A and B.
     # We will advance this pointer as we move in the K direction
@@ -284,8 +286,8 @@ def matmul_kernel(
     offs_am = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
     offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
     offs_k = tl.arange(0, BLOCK_SIZE_K)
-    a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
-    b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
+    a_ptrs = a_ptr + (stride_al * bid) + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
+    b_ptrs = b_ptr + (stride_bl * bid) + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
 
     # -----------------------------------------------------------
     # Iterate to compute a block of the C matrix.
@@ -315,7 +317,7 @@ def matmul_kernel(
     # Write back the block of the output matrix C with masks.
     offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
+    c_ptrs = c_ptr + (stride_cl * bid) + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
     c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
     tl.store(c_ptrs, c, mask=c_mask)
 
@@ -333,19 +335,19 @@ def leaky_relu(x):
 
 def matmul(a, b, c, activation=""):
     # Check constraints.
-    assert a.shape[1] == b.shape[0], "Incompatible dimensions"
-    assert a.is_contiguous(), "Matrix A must be contiguous"
-    M, K = a.shape
-    K, N = b.shape
+    # assert a.shape[1] == b.shape[0], "Incompatible dimensions"
+    # assert a.is_contiguous(), "Matrix A must be contiguous"
+    L, M, K = a.shape
+    L, K, N = b.shape
     # Allocates output.
     # 1D launch kernel where each block gets its own program.
-    grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']), )
+    grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']), L, )
     matmul_kernel[grid](
         a, b, c,  #
         M, N, K,  #
-        a.stride(0), a.stride(1),  #
-        b.stride(0), b.stride(1),  #
-        c.stride(0), c.stride(1),  #
+        a.stride(0), a.stride(1), a.stride(2),  #
+        b.stride(0), b.stride(1), b.stride(2),  #
+        c.stride(0), c.stride(1), c.stride(2),  #
         ACTIVATION=activation  #
     )
     return c
@@ -412,8 +414,8 @@ for fp8_inputs in [False]:
             line_arg="provider",  # Argument name whose value corresponds to a different line in the plot
             # Possible values for `line_arg`
             # Don't compare to cublas for fp8 cases as torch.matmul doesn't support fp8 at the moment.
-            line_vals=["triton"] if fp8_inputs else [ref_lib.lower(), "triton"],  # Label name for the lines
-            line_names=["Triton"] if fp8_inputs else [ref_lib, "Triton"],  # Line styles
+            line_vals=["triton"],
+            line_names=["Triton"],
             styles=[("green", "-"), ("blue", "-")],
             ylabel="TFLOPS",  # Label name for the y-axis
             plot_name="matmul-performance-" +
@@ -421,108 +423,25 @@ for fp8_inputs in [False]:
             args={"fp8_inputs": fp8_inputs},
         ))
 
-def _summarize_statistics(times, quantiles, return_mode):
-    import torch
-    if quantiles is not None:
-        ret = torch.quantile(times, torch.tensor(quantiles, dtype=torch.float)).tolist()
-        if len(ret) == 1:
-            ret = ret[0]
-        return ret
-    if return_mode == "all":
-        return times.tolist()
-    return getattr(torch, return_mode)(times).item()
-
-def do_bench(fn, warmup=25, rep=100, grad_to_none=None, quantiles=None, fast_flush=True, return_mode="mean",
-             device_type="cuda"):
-    """
-    Benchmark the runtime of the provided function. By default, return the median runtime of :code:`fn` along with
-    the 20-th and 80-th performance percentile.
-
-    :param fn: Function to benchmark
-    :type fn: Callable
-    :param warmup: Warmup time (in ms)
-    :type warmup: int
-    :param rep: Repetition time (in ms)
-    :type rep: int
-    :param grad_to_none: Reset the gradient of the provided tensor to None
-    :type grad_to_none: torch.tensor, optional
-    :param quantiles: Performance percentile to return in addition to the median.
-    :type quantiles: list[float], optional
-    :param fast_flush: Use faster kernel to flush L2 cache between measurements
-    :type fast_flush: bool, default is True
-    :param return_mode: The statistical measure to return. Options are "min", "max", "mean", "median", or "all" Default is "mean".    :type return_mode: str
-    """
-    assert return_mode in ["min", "max", "mean", "median", "all"]
-    import torch
-
-    di = torch._dynamo.device_interface.get_interface_for_device(device_type)
-
-    fn()
-    di.synchronize()
-
-    # We maintain a buffer of 256 MB that we clear
-    # before each kernel call to make sure that the L2 cache
-    # doesn't contain any input data before the run
-    cache_size = 256 * 1024 * 1024
-    if fast_flush:
-        cache = torch.empty(int(cache_size // 4), dtype=torch.int, device=device_type)
-    else:
-        cache = torch.empty(int(cache_size), dtype=torch.int8, device=device_type)
-
-    # Estimate the runtime of the function
-    start_event = di.Event(enable_timing=True)
-    end_event = di.Event(enable_timing=True)
-    start_event.record()
-    for _ in range(5):
-        cache.zero_()
-        fn()
-    end_event.record()
-    di.synchronize()
-    estimate_ms = start_event.elapsed_time(end_event) / 5
-
-    # compute number of warmup and repeat
-    n_warmup = max(1, int(warmup / estimate_ms))
-    n_repeat = max(1, int(rep / estimate_ms))
-    start_event = [di.Event(enable_timing=True) for i in range(n_repeat)]
-    end_event = [di.Event(enable_timing=True) for i in range(n_repeat)]
-    # Warm-up
-    for _ in range(n_warmup):
-        fn()
-    # Benchmark
-    start_event[0].record()
-    for i in range(n_repeat):
-        # we don't want `fn` to accumulate gradient values
-        # if it contains a backward pass. So we clear the
-        # provided gradients
-        if grad_to_none is not None:
-            for x in grad_to_none:
-                x.grad = None
-        # we clear the L2 cache before each run
-        # cache.zero_()
-        # record time of `fn`
-        fn()
-    end_event[0].record()
-    # Record clocks
-    di.synchronize()
-
-    a = (start_event[0].elapsed_time(end_event[0])) / float(n_repeat)
-    return a, a, a
-
-    # times = torch.tensor([s.elapsed_time(e) for s, e in zip(start_event, end_event)], dtype=torch.float)
-    # return _summarize_statistics(times, quantiles, return_mode)
-
-
 @triton.testing.perf_report(configs)
 def benchmark(M, N, K, provider, fp8_inputs):
-    a = torch.randn((M, K), device='cuda', dtype=torch.float16)
-    b = torch.randn((K, N), device='cuda', dtype=torch.float16)
-    c = torch.randn((M, N), device='cuda', dtype=torch.float16)
+    L = 4
+    M = 2048
+    N = 2048
+    a = torch.randn((L, M, K), device='cuda', dtype=torch.float16)
+    b = torch.randn((L, K, N), device='cuda', dtype=torch.float16)
+    c = torch.randn((L, M, N), device='cuda', dtype=torch.float16)
+    # ac = cupy.random.rand(M, K, dtype=cupy.float32).astype(cupy.float16)
+    # bc = cupy.random.rand(K, N, dtype=cupy.float32).astype(cupy.float16)
+    # cc = cupy.random.rand(M, N, dtype=cupy.float32).astype(cupy.float16)
     quantiles = [0.5, 0.2, 0.8]
-    if provider == ref_lib.lower():
-        ms, min_ms, max_ms = do_bench(lambda: torch.matmul(a, b, out=c), quantiles=quantiles)
+    # if provider == ref_lib.lower():
+    #     ms, min_ms, max_ms = triton.testing.do_bench(lambda: cublas_half_matmul_simple(a, b, c), quantiles=quantiles)
+    #     # ms, min_ms, max_ms = do_bench(lambda: torch.matmul(a, b, out=c), quantiles=quantiles)
+    #     # ms, min_ms, max_ms = do_bench(lambda: cupy.matmul(ac, bc, out=cc), quantiles=quantiles)
     if provider == 'triton':
-        ms, min_ms, max_ms = do_bench(lambda: matmul(a, b, c), quantiles=quantiles)
-    perf = lambda ms: 2 * M * N * K * 1e-12 / (ms * 1e-3)
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: matmul(a, b, c), quantiles=quantiles)
+    perf = lambda ms: L * 2 * M * N * K * 1e-12 / (ms * 1e-3)
     return perf(ms), perf(max_ms), perf(min_ms)
 
 
