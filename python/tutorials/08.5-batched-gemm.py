@@ -430,19 +430,11 @@ def benchmark(M, N, K, provider, fp8_inputs):
     L = 4
     M = 2048
     N = 2048
-    a = torch.randn((L, M, K), device='cuda', dtype=torch.float16)
-    b = torch.randn((L, K, N), device='cuda', dtype=torch.float16)
-    c = torch.randn((L, M, N), device='cuda', dtype=torch.float16)
-    # ac = cupy.random.rand(M, K, dtype=cupy.float32).astype(cupy.float16)
-    # bc = cupy.random.rand(K, N, dtype=cupy.float32).astype(cupy.float16)
-    # cc = cupy.random.rand(M, N, dtype=cupy.float32).astype(cupy.float16)
+    a = ((torch.randint(0, 1, (L, M, K), device='cuda') * 2) - 1).type(torch.float16)
+    b = ((torch.randint(0, 1, (L, K, N), device='cuda') * 2) - 1).type(torch.float16)
+    c = torch.empty((L, M, N), device='cuda', dtype=torch.float16)
     quantiles = [0.5, 0.2, 0.8]
-    # if provider == ref_lib.lower():
-    #     ms, min_ms, max_ms = triton.testing.do_bench(lambda: cublas_half_matmul_simple(a, b, c), quantiles=quantiles)
-    #     # ms, min_ms, max_ms = do_bench(lambda: torch.matmul(a, b, out=c), quantiles=quantiles)
-    #     # ms, min_ms, max_ms = do_bench(lambda: cupy.matmul(ac, bc, out=cc), quantiles=quantiles)
-    if provider == 'triton':
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: matmul(a, b, c), quantiles=quantiles)
+    ms, min_ms, max_ms = triton.testing.do_bench(lambda: matmul(a, b, c), quantiles=quantiles)
     perf = lambda ms: L * 2 * M * N * K * 1e-12 / (ms * 1e-3)
     return perf(ms), perf(max_ms), perf(min_ms)
 

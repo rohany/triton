@@ -296,10 +296,10 @@ for fp8_inputs in [False]:
 
 @triton.testing.perf_report(configs)
 def benchmark(M, N, K, provider, fp8_inputs):
-    a = torch.randn((M, K), device='cuda', dtype=torch.float16)
-    b = torch.randn((K, N), device='cuda', dtype=torch.float16)
-    c = torch.randn((M, N), device='cuda', dtype=torch.float16)
-    cv = torch.randn((M,), device='cuda', dtype=torch.float16)
+    a = ((torch.randint(0, 1, (M, K), device='cuda') * 2) - 1).type(torch.float16)
+    b = ((torch.randint(0, 1, (K, N), device='cuda') * 2) - 1).type(torch.float16)
+    c = torch.empty((M, N), device='cuda', dtype=torch.float16)
+    cv = torch.empty((M,), device='cuda', dtype=torch.float16)
     quantiles = [0.5, 0.2, 0.8]
     ms, min_ms, max_ms = triton.testing.do_bench(lambda: matmul(a, b, c, cv), quantiles=quantiles)
     perf = lambda ms: (2 * M * N * K + M * N) * 1e-12 / (ms * 1e-3)

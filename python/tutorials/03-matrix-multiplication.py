@@ -423,107 +423,16 @@ for fp8_inputs in [False]:
             args={"fp8_inputs": fp8_inputs},
         ))
 
-def _summarize_statistics(times, quantiles, return_mode):
-    import torch
-    if quantiles is not None:
-        ret = torch.quantile(times, torch.tensor(quantiles, dtype=torch.float)).tolist()
-        if len(ret) == 1:
-            ret = ret[0]
-        return ret
-    if return_mode == "all":
-        return times.tolist()
-    return getattr(torch, return_mode)(times).item()
-
-def do_bench(fn, warmup=25, rep=100, grad_to_none=None, quantiles=None, fast_flush=True, return_mode="mean",
-             device_type="cuda"):
-    """
-    Benchmark the runtime of the provided function. By default, return the median runtime of :code:`fn` along with
-    the 20-th and 80-th performance percentile.
-
-    :param fn: Function to benchmark
-    :type fn: Callable
-    :param warmup: Warmup time (in ms)
-    :type warmup: int
-    :param rep: Repetition time (in ms)
-    :type rep: int
-    :param grad_to_none: Reset the gradient of the provided tensor to None
-    :type grad_to_none: torch.tensor, optional
-    :param quantiles: Performance percentile to return in addition to the median.
-    :type quantiles: list[float], optional
-    :param fast_flush: Use faster kernel to flush L2 cache between measurements
-    :type fast_flush: bool, default is True
-    :param return_mode: The statistical measure to return. Options are "min", "max", "mean", "median", or "all" Default is "mean".    :type return_mode: str
-    """
-    assert return_mode in ["min", "max", "mean", "median", "all"]
-    import torch
-
-    di = torch._dynamo.device_interface.get_interface_for_device(device_type)
-
-    fn()
-    di.synchronize()
-
-    # We maintain a buffer of 256 MB that we clear
-    # before each kernel call to make sure that the L2 cache
-    # doesn't contain any input data before the run
-    cache_size = 256 * 1024 * 1024
-    if fast_flush:
-        cache = torch.empty(int(cache_size // 4), dtype=torch.int, device=device_type)
-    else:
-        cache = torch.empty(int(cache_size), dtype=torch.int8, device=device_type)
-
-    # Estimate the runtime of the function
-    start_event = di.Event(enable_timing=True)
-    end_event = di.Event(enable_timing=True)
-    start_event.record()
-    for _ in range(5):
-        cache.zero_()
-        fn()
-    end_event.record()
-    di.synchronize()
-    estimate_ms = start_event.elapsed_time(end_event) / 5
-
-    # compute number of warmup and repeat
-    n_warmup = max(1, int(warmup / estimate_ms))
-    n_repeat = max(1, int(rep / estimate_ms))
-    start_event = [di.Event(enable_timing=True) for i in range(n_repeat)]
-    end_event = [di.Event(enable_timing=True) for i in range(n_repeat)]
-    # Warm-up
-    for _ in range(n_warmup):
-        fn()
-    # Benchmark
-    start_event[0].record()
-    for i in range(n_repeat):
-        # we don't want `fn` to accumulate gradient values
-        # if it contains a backward pass. So we clear the
-        # provided gradients
-        if grad_to_none is not None:
-            for x in grad_to_none:
-                x.grad = None
-        # we clear the L2 cache before each run
-        # cache.zero_()
-        # record time of `fn`
-        fn()
-    end_event[0].record()
-    # Record clocks
-    di.synchronize()
-
-    a = (start_event[0].elapsed_time(end_event[0])) / float(n_repeat)
-    return a, a, a
-
-    # times = torch.tensor([s.elapsed_time(e) for s, e in zip(start_event, end_event)], dtype=torch.float)
-    # return _summarize_statistics(times, quantiles, return_mode)
-
-
 @triton.testing.perf_report(configs)
 def benchmark(M, N, K, provider, fp8_inputs):
-    a = torch.randn((M, K), device='cuda', dtype=torch.float16)
-    b = torch.randn((K, N), device='cuda', dtype=torch.float16)
-    c = torch.randn((M, N), device='cuda', dtype=torch.float16)
+    a = ((torch.randint(0, 1, (M, K), device='cuda') * 2) - 1).type(torch.float16)
+    b = ((torch.randint(0, 1, (K, N), device='cuda') * 2) - 1).type(torch.float16)
+    c = torch.empty((M, N), device='cuda', dtype=torch.float16)
     quantiles = [0.5, 0.2, 0.8]
     if provider == ref_lib.lower():
-        ms, min_ms, max_ms = do_bench(lambda: torch.matmul(a, b, out=c), quantiles=quantiles)
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: torch.matmul(a, b, out=c), quantiles=quantiles)
     if provider == 'triton':
-        ms, min_ms, max_ms = do_bench(lambda: matmul(a, b, c), quantiles=quantiles)
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: matmul(a, b, c), quantiles=quantiles)
     perf = lambda ms: 2 * M * N * K * 1e-12 / (ms * 1e-3)
     return perf(ms), perf(max_ms), perf(min_ms)
 
