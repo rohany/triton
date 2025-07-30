@@ -1,0 +1,9 @@
+# Initial setup:
+
+pip install -r requirements.txt
+MAX_JOBS=3 TRITON_BUILD_WITH_CLANG_LLD=ON TRITON_BUILD_PROTON=OFF pip install -e . -v --no-build-isolation
+
+# Follow up builds.
+pushd ./build/<target_dir>/
+cmake --build . -j
+popd

@@ -91,3 +91,22 @@ target_link_libraries(triton-tensor-layout PRIVATE
   TritonTestDialect
   TritonAMDGPUTestAnalysis
   )
+
+add_llvm_executable(ttir-pipeliner ttir-pipeliner.cpp PARTIAL_SOURCES_INTENDED)
+llvm_update_compile_flags(ttir-pipeliner)
+target_link_libraries(ttir-pipeliner PRIVATE
+  ${dialect_libs}
+  ${conversion_libs}
+  ${triton_libs}
+
+  TritonTestAnalysis
+  TritonTestDialect
+  TritonAMDGPUTestAnalysis
+
+  # Don't need these right now?
+  # MLIR core
+  # MLIROptLib
+  # MLIRPass
+  # MLIRTransforms
+)
+mlir_check_all_link_libraries(ttir-pipeliner)
