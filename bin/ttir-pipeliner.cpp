@@ -18,17 +18,79 @@ using namespace llvm;
 using namespace mlir::triton;
 
 class InstCostEstimator {
- public:
+public:
   virtual ~InstCostEstimator() {}
-  virtual int64_t cost(mlir::Operation* op);
+  virtual int64_t cost(mlir::Operation *op);
 };
 
 class HopperCostEstimator : public InstCostEstimator {
 public:
   HopperCostEstimator() {}
   ~HopperCostEstimator() {}
-  int64_t cost(mlir::Operation* op) override {
-    return 0;
+  int64_t cost(mlir::Operation *op) override {
+    return llvm::TypeSwitch<mlir::Operation *, int64_t>(op)
+        // Matmul operations.
+        .Case<triton::DotOpInterface>([&](auto dotop) { 
+          return 1;
+        })
+        // Reductions.
+        .Case<triton::ReduceOp>([&](auto redop) {
+          // TODO (rohany): ...
+          return 0;
+        })
+        // Arithmetic operations. These need cases internally
+        // about whether they are operating on tensors or scalars.
+        // If scalars. we can ignore them.
+        .Case<arith::AddFOp>([&](auto addop) {
+          // TODO (rohany): ...
+          return 0;
+        })
+        .Case<arith::MulFOp>([&](auto mulop) {
+          // TODO (rohany): ...
+          return 0;
+        })
+        .Case<arith::MaxNumFOp>([&]( auto maxop) {
+          // TODO (rohany): ...
+          return 0;
+        })
+        .Case<arith::SubFOp>([&](auto subop) {
+          // TODO (rohany): ...
+          return 0;
+        })
+        .Case<arith::TruncFOp>([&](auto truncop) {
+          // TODO (rohany): ...
+          return 0;
+        })
+        // Special math functions.
+        .Case<math::Exp2Op>([&](auto expop) {
+          // TODO (rohany): ...
+          return 0;
+        })
+        // GMEM -> SMEM loads, or SMEM- > GMEM stores.
+        .Case<triton::LoadOp, triton::StoreOp>([&](auto memop) {
+          // TODO (rohany): Not sure what to do yet with loads. Based on the
+          //  model of the machine that we've been discussing, it might be
+          //  feasible to pretend that loads actually have no latency, since
+          //  we're going to put them into a separate warp anyway. Maybe we
+          //  can pretend zero latency loads if we know the loads have no
+          //  dependencies from tensor operations inside the loop? The same
+          //  logic also goes for stores, where if there's nothing that depends
+          //  on the store finishing we might be able to pretend it to not have
+          //  any latency either...
+          return 0;
+        })
+        // Triton operations that can be thought of as having 0 cost.
+        // TODO (rohany): Not sure about splat here, because technically this
+        //  counts as doing some register moves, or maybe a copy into a memory
+        //  like TMEM.
+        .Case<triton::AdvanceOp, triton::SplatOp, triton::ExpandDimsOp, triton::BroadcastOp>([&](auto op) {
+          return 0;
+        })
+        .Default([&](mlir::Operation * op) {
+          llvm::errs() << "Unhandled operation in cost estimator: " << op->getName().getStringRef() << "\n";
+          assert(false);
+          return 0;
+        });
   }
 };
 
@@ -36,7 +98,7 @@ class BlackwellCostEstimator : public InstCostEstimator {
 public:
   BlackwellCostEstimator() {}
   ~BlackwellCostEstimator() {}
-  int64_t cost(mlir::Operation* op) override {
+  int64_t cost(mlir::Operation *op) override {
     assert(false);
     return 0;
   }
@@ -103,7 +165,7 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  std::unique_ptr<InstCostEstimator> estimator = 
+  std::unique_ptr<InstCostEstimator> estimator =
       std::make_unique<HopperCostEstimator>();
 
   // We now have op, which is an mlir::ModuleOp. As part of a normal
@@ -115,7 +177,13 @@ int main(int argc, char **argv) {
 
     // Iterate through all operations in the for loop.
     // for (auto& op : forOp.getOps()) {
-    //   op.dump();
+      // op.dump();
+
+      // Test that enough cases in the cost estimator are handled.
+      // if (!llvm::isa<scf::YieldOp>(op)) {
+      //   auto cost = estimator->cost(&op);
+      //   llvm::outs() << op.getName().getStringRef() << " ==> " << cost << "\n";
+      // }
     // }
   });
 
