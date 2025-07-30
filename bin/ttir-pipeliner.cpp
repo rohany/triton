@@ -53,12 +53,23 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  // Run a few simplification passes on the IR.
+  // Run a few simplification passes on the IR. This is taken
+  // from the TTIR construction done in
+  // `third_party/nvidia/backend/compiler.py`.
   mlir::PassManager pm(op.get()->getName(),
                        mlir::PassManager::Nesting::Explicit);
   {
     pm.addPass(mlir::createInlinerPass());
+    // This is done by the TTIR construction pass, but results
+    // in a large amount of code expansion that isn't really
+    // relevant for what we're trying to do.
+    // pm.addPass(triton::createTritonRewriteTensorPointer());
+    pm.addPass(mlir::createCanonicalizerPass());
     pm.addPass(mlir::createCSEPass());
+    pm.addPass(triton::createTritonLoopAwareCSE());
+    pm.addPass(triton::createTritonCombineOps());
+    pm.addPass(triton::createTritonReorderBroadcast());
+    pm.addPass(mlir::createSymbolDCEPass());
     pm.addPass(mlir::createCanonicalizerPass());
   }
   if (mlir::failed(pm.run(*op))) {
