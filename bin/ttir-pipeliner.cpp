@@ -11,10 +11,36 @@
 #include "llvm/Support/ToolOutputFile.h"
 
 #include <iostream>
+#include <memory>
 
 using namespace mlir;
 using namespace llvm;
 using namespace mlir::triton;
+
+class InstCostEstimator {
+ public:
+  virtual ~InstCostEstimator() {}
+  virtual int64_t cost(mlir::Operation* op);
+};
+
+class HopperCostEstimator : public InstCostEstimator {
+public:
+  HopperCostEstimator() {}
+  ~HopperCostEstimator() {}
+  int64_t cost(mlir::Operation* op) override {
+    return 0;
+  }
+};
+
+class BlackwellCostEstimator : public InstCostEstimator {
+public:
+  BlackwellCostEstimator() {}
+  ~BlackwellCostEstimator() {}
+  int64_t cost(mlir::Operation* op) override {
+    assert(false);
+    return 0;
+  }
+};
 
 int main(int argc, char **argv) {
   // Parse our command line operations.
@@ -76,6 +102,9 @@ int main(int argc, char **argv) {
     llvm::errs() << "Failed running pre-processing pass pipeline.\n";
     return 1;
   }
+
+  std::unique_ptr<InstCostEstimator> estimator = 
+      std::make_unique<HopperCostEstimator>();
 
   // We now have op, which is an mlir::ModuleOp. As part of a normal
   // compiler, this logic would be extracted into a pass, but we can
