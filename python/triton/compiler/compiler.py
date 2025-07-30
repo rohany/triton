@@ -220,6 +220,11 @@ class CompileTimer:
             store_results=delta(stage_start, self.store_results_end),
         )
 
+def make_context(backend):
+    context = ir.context()
+    ir.load_dialects(context)
+    backend.load_dialects(context)
+    return context
 
 def compile(src, target=None, options=None, _env_vars=None):
     compilation_listener = knobs.compilation.listener
