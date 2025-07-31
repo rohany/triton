@@ -5,42 +5,62 @@
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Support/FileUtilities.h"
 
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/Support/CommandLine.h"
-#include "llvm/Support/FileUtilities.h"
 #include "llvm/Support/SourceMgr.h"
-#include "llvm/Support/ToolOutputFile.h"
 
 #include <iostream>
 #include <memory>
+#include <vector>
 
 using namespace mlir;
 using namespace llvm;
 using namespace mlir::triton;
 
 class InstCostEstimator {
- public:
+public:
   virtual ~InstCostEstimator() {}
-  virtual int64_t cost(mlir::Operation* op);
+  virtual int64_t cost(mlir::Operation *op);
 };
 
 class HopperCostEstimator : public InstCostEstimator {
 public:
   HopperCostEstimator() {}
   ~HopperCostEstimator() {}
-  int64_t cost(mlir::Operation* op) override {
-    return 0;
-  }
+  int64_t cost(mlir::Operation *op) override { return 0; }
 };
 
 class BlackwellCostEstimator : public InstCostEstimator {
 public:
   BlackwellCostEstimator() {}
   ~BlackwellCostEstimator() {}
-  int64_t cost(mlir::Operation* op) override {
+  int64_t cost(mlir::Operation *op) override {
     assert(false);
     return 0;
   }
 };
+
+std::string node_name(const mlir::Value &value, mlir::AsmState &asm_state) {
+  std::string str;
+  llvm::raw_string_ostream os(str);
+  value.printAsOperand(os, asm_state);
+  std::string result = os.str();
+  return result;
+}
+
+void dump_dot_graph(
+    llvm::DenseMap<mlir::Value, std::vector<mlir::Value>> &dependence_graph,
+    mlir::AsmState &asm_state) {
+
+  std::cout << "digraph G {" << std::endl;
+  for (const auto &[source, sinks] : dependence_graph) {
+    for (const auto &sink : sinks) {
+      std::cout << node_name(source, asm_state) << " -> "
+                << node_name(sink, asm_state) << ";\n";
+    }
+  }
+  std::cout << "}" << std::endl;
+}
 
 int main(int argc, char **argv) {
   // Parse our command line operations.
@@ -103,25 +123,34 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  std::unique_ptr<InstCostEstimator> estimator = 
+  std::unique_ptr<InstCostEstimator> estimator =
       std::make_unique<HopperCostEstimator>();
+
+  llvm::DenseMap<mlir::Value, std::vector<mlir::Value>> dependence_graph;
 
   // We now have op, which is an mlir::ModuleOp. As part of a normal
   // compiler, this logic would be extracted into a pass, but we can
   // do the manipulation inline here.
   op->walk([&](scf::ForOp forOp) {
-    // Dump the for loop.
-    // forOp->dump();
+    for (auto &op : forOp.getOps()) {
+      for (auto result : op.getOperands()) {
+        if (dependence_graph.find(result) == dependence_graph.end()) {
+          dependence_graph[result] = std::vector<mlir::Value>();
+        }
 
-    // Iterate through all operations in the for loop.
-    // for (auto& op : forOp.getOps()) {
-    //   op.dump();
-    // }
+        for (auto user : result.getUsers()) {
+          for (auto userResult : user->getResults()) {
+            dependence_graph[result].push_back(userResult);
+          }
+        }
+      }
+    }
   });
 
   // Print the entire module.
   mlir::AsmState asmState(op.get(), mlir::OpPrintingFlags(),
                           /*locationMap=*/nullptr, &fallbackResourceMap);
+  dump_dot_graph(dependence_graph, asmState);
   op.get()->print(llvm::outs(), asmState);
 
   return 0;
