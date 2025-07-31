@@ -6,6 +6,7 @@
 #include "mlir/Support/FileUtilities.h"
 
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/SourceMgr.h"
 
@@ -49,7 +50,7 @@ std::string node_name(const mlir::Value &value, mlir::AsmState &asm_state) {
 }
 
 void dump_dot_graph(
-    llvm::DenseMap<mlir::Value, std::vector<mlir::Value>> &dependence_graph,
+    llvm::DenseMap<mlir::Value, llvm::DenseSet<mlir::Value>> &dependence_graph,
     mlir::AsmState &asm_state) {
 
   std::cout << "digraph G {" << std::endl;
@@ -126,7 +127,7 @@ int main(int argc, char **argv) {
   std::unique_ptr<InstCostEstimator> estimator =
       std::make_unique<HopperCostEstimator>();
 
-  llvm::DenseMap<mlir::Value, std::vector<mlir::Value>> dependence_graph;
+  llvm::DenseMap<mlir::Value, llvm::DenseSet<mlir::Value>> dependence_graph;
 
   // We now have op, which is an mlir::ModuleOp. As part of a normal
   // compiler, this logic would be extracted into a pass, but we can
@@ -135,12 +136,12 @@ int main(int argc, char **argv) {
     for (auto &op : forOp.getOps()) {
       for (auto result : op.getOperands()) {
         if (dependence_graph.find(result) == dependence_graph.end()) {
-          dependence_graph[result] = std::vector<mlir::Value>();
+          dependence_graph[result] = llvm::DenseSet<mlir::Value>();
         }
 
         for (auto user : result.getUsers()) {
           for (auto userResult : user->getResults()) {
-            dependence_graph[result].push_back(userResult);
+            dependence_graph[result].insert(userResult);
           }
         }
       }
@@ -148,10 +149,10 @@ int main(int argc, char **argv) {
   });
 
   // Print the entire module.
-  mlir::AsmState asmState(op.get(), mlir::OpPrintingFlags(),
-                          /*locationMap=*/nullptr, &fallbackResourceMap);
-  dump_dot_graph(dependence_graph, asmState);
-  op.get()->print(llvm::outs(), asmState);
+  mlir::AsmState asm_state(op.get(), mlir::OpPrintingFlags(),
+                           /*locationMap=*/nullptr, &fallbackResourceMap);
+  dump_dot_graph(dependence_graph, asm_state);
+  op.get()->print(llvm::outs(), asm_state);
 
   return 0;
 }
