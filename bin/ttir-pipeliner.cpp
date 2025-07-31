@@ -165,14 +165,17 @@ int main(int argc, char **argv) {
 
         // TODO: Make sure there aren't any other backedges
         if (op.getName().getStringRef() == "scf.yield") {
-          mlir::Value yield_var = op.getOperand(0);
-          mlir::Value loop_carried_var = forOp.getRegionIterArg(0);
-          for (auto user : loop_carried_var.getUsers()) {
-            for (auto result : user->getResults()) {
-              // Add backedge to first use only
-              dependence_graph[yield_var].insert(result);
-              break;
+          auto yield_idx = 0;
+          for (auto yield_var : op.getOperands()) {
+            mlir::Value loop_carried_var = forOp.getRegionIterArg(yield_idx);
+            for (auto user : loop_carried_var.getUsers()) {
+              for (auto result : user->getResults()) {
+                // Add backedge to first use only
+                dependence_graph[yield_var].insert(result);
+                break;
+              }
             }
+            yield_idx += 1;
           }
         }
       }
