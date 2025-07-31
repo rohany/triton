@@ -28,43 +28,142 @@ public:
   HopperCostEstimator() {}
   ~HopperCostEstimator() {}
   int64_t cost(mlir::Operation *op) override {
+
+    auto gemm_tops = [](mlir::Type typ) -> int64_t {
+      // * FP8 with * accumulate: 2000 TFlops
+      // * FP16 with * accumulate: 1000 TFlops
+      // * FP32 with * accumulate: 500 TFlops
+      // * FP64 with * accumulate: 60 TFlops
+      return llvm::TypeSwitch<mlir::Type, int64_t>(typ)
+          .Case<mlir::IntegerType>([&](auto intty) -> int64_t {
+            assert(false);
+            return 0;
+          })
+          .Case<mlir::FloatType>([&](auto fty) -> int64_t {
+            // TODO (rohany): This isn't enough for types like e5m3 or
+            // whatever...
+            switch (fty.getWidth()) {
+            case 8:
+              return 2000;
+            case 16:
+              return 1000;
+            case 32:
+              return 500;
+            case 64:
+              return 60;
+            default: {
+              assert(false);
+              return 0;
+            }
+            }
+          });
+    };
+    auto simt_tops = [](mlir::Type typ) -> int64_t {
+      // Notes for non-tensor ops:
+      // * FP16: 120 TFLOPS
+      // * FP32: 60 TFLOPS
+      // * FP64: 30 TFLOPS
+      return llvm::TypeSwitch<mlir::Type, int64_t>(typ)
+          .Case<mlir::IntegerType>([&](auto intty) -> int64_t {
+            assert(false);
+            return 0;
+          })
+          .Case<mlir::FloatType>([&](auto fty) -> int64_t {
+            switch (fty.getWidth()) {
+            // The SM can't do fp8 non-tensor core operations, or it
+            // emulates them with fp16.
+            case 8: // [fallthrough]
+            case 16:
+              return 120;
+            case 32:
+              return 60;
+            case 64:
+              return 30;
+            default: {
+              assert(false);
+              return 0;
+            }
+            }
+          });
+    };
+    auto sfu_tops = [](mlir::Type typ) -> int64_t {
+      auto fty = llvm::dyn_cast<mlir::FloatType>(typ);
+      assert(fty);
+      // TODO (rohany): I wasn't able to derive these from scratch. I took
+      //  the logic described in the FA3 paper, but I couldn't find the
+      //  documentation that they referenced.
+      switch (fty.getWidth()) {
+      case 16:
+        return 8;
+      case 32:
+        return 4;
+      case 64:
+        return 2;
+      default: {
+        assert(false);
+        return 0;
+      }
+      }
+    };
+
     return llvm::TypeSwitch<mlir::Operation *, int64_t>(op)
         // Matmul operations.
-        .Case<triton::DotOpInterface>([&](auto dotop) { 
-          return 1;
+        .Case<triton::DotOpInterface>([&](auto dotop) {
+          auto Aty = llvm::dyn_cast<mlir::TensorType>(dotop.getA().getType());
+          auto Bty = llvm::dyn_cast<mlir::TensorType>(dotop.getB().getType());
+          auto elemTy = Aty.getElementType();
+          assert(elemTy == Bty.getElementType());
+          assert(Aty.hasStaticShape() && Bty.hasStaticShape());
+          int64_t M = Aty.getShape()[0];
+          int64_t K = Aty.getShape()[1];
+          int64_t N = Bty.getShape()[1];
+          int64_t flops = 2 * M * N * K;
+          return flops / gemm_tops(Aty.getElementType());
         })
+
         // Reductions.
         .Case<triton::ReduceOp>([&](auto redop) {
-          // TODO (rohany): ...
-          return 0;
+          // We can assume that the reduction here is a unit-cost arithmetic
+          // operation, similarly costed to the operations below.
+          assert(redop.getOperands().size() == 1);
+          auto inputTy =
+              llvm::dyn_cast<mlir::TensorType>(redop.getOperand(0).getType());
+          assert(inputTy);
+          int64_t axis = redop.getAxis();
+          // A reduction on axis i with dimension n performs n-1 flops for
+          // each element in the remaining dimensions.
+          int64_t flops = 1;
+          auto shape = inputTy.getShape();
+          for (size_t i = 0; i < shape.size(); i++) {
+            flops *= i == axis ? shape[i] - 1 : shape[i];
+          }
+          return flops / simt_tops(inputTy.getElementType());
         })
         // Arithmetic operations. These need cases internally
         // about whether they are operating on tensors or scalars.
         // If scalars. we can ignore them.
-        .Case<arith::AddFOp>([&](auto addop) {
-          // TODO (rohany): ...
-          return 0;
-        })
-        .Case<arith::MulFOp>([&](auto mulop) {
-          // TODO (rohany): ...
-          return 0;
-        })
-        .Case<arith::MaxNumFOp>([&]( auto maxop) {
-          // TODO (rohany): ...
-          return 0;
-        })
-        .Case<arith::SubFOp>([&](auto subop) {
-          // TODO (rohany): ...
-          return 0;
-        })
-        .Case<arith::TruncFOp>([&](auto truncop) {
-          // TODO (rohany): ...
-          return 0;
+        .Case<arith::AddFOp, arith::MulFOp, arith::MaxNumFOp, arith::SubFOp,
+              arith::TruncFOp, triton::FpToFpOp>([&](auto aop) -> int64_t {
+          mlir::TensorType output =
+              llvm::dyn_cast<mlir::TensorType>(aop.getResult().getType());
+          if (!output) {
+            return 0;
+          }
+
+          assert(output.hasStaticShape());
+          int64_t elems = output.getNumElements();
+          return elems / simt_tops(output.getElementType());
         })
         // Special math functions.
-        .Case<math::Exp2Op>([&](auto expop) {
-          // TODO (rohany): ...
-          return 0;
+        .Case<math::Exp2Op>([&](auto expop) -> int64_t {
+          mlir::TensorType output =
+              llvm::dyn_cast<mlir::TensorType>(expop.getResult().getType());
+          if (!output) {
+            return 0;
+          }
+          assert(output.hasStaticShape());
+          int64_t elems = output.getNumElements();
+          return elems / sfu_tops(output.getElementType());
         })
         // GMEM -> SMEM loads, or SMEM- > GMEM stores.
         .Case<triton::LoadOp, triton::StoreOp>([&](auto memop) {
@@ -83,11 +182,11 @@ public:
         // TODO (rohany): Not sure about splat here, because technically this
         //  counts as doing some register moves, or maybe a copy into a memory
         //  like TMEM.
-        .Case<triton::AdvanceOp, triton::SplatOp, triton::ExpandDimsOp, triton::BroadcastOp>([&](auto op) {
-          return 0;
-        })
-        .Default([&](mlir::Operation * op) {
-          llvm::errs() << "Unhandled operation in cost estimator: " << op->getName().getStringRef() << "\n";
+        .Case<triton::AdvanceOp, triton::SplatOp, triton::ExpandDimsOp,
+              triton::BroadcastOp>([&](auto op) { return 0; })
+        .Default([&](mlir::Operation *op) {
+          llvm::errs() << "Unhandled operation in cost estimator: "
+                       << op->getName().getStringRef() << "\n";
           assert(false);
           return 0;
         });
@@ -176,15 +275,15 @@ int main(int argc, char **argv) {
     // forOp->dump();
 
     // Iterate through all operations in the for loop.
-    // for (auto& op : forOp.getOps()) {
+    for (auto &op : forOp.getOps()) {
       // op.dump();
 
       // Test that enough cases in the cost estimator are handled.
-      // if (!llvm::isa<scf::YieldOp>(op)) {
-      //   auto cost = estimator->cost(&op);
-      //   llvm::outs() << op.getName().getStringRef() << " ==> " << cost << "\n";
-      // }
-    // }
+      if (!llvm::isa<scf::YieldOp>(op)) {
+        auto cost = estimator->cost(&op);
+        llvm::outs() << op.getName().getStringRef() << " ==> " << cost << "\n";
+      }
+    }
   });
 
   // Print the entire module.
