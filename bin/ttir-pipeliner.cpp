@@ -134,18 +134,28 @@ int main(int argc, char **argv) {
       std::make_unique<HopperCostEstimator>();
 
   llvm::DenseMap<mlir::Value, llvm::DenseSet<mlir::Value>> dependence_graph;
+
   // We now have op, which is an mlir::ModuleOp. As part of a normal
   // compiler, this logic would be extracted into a pass, but we can
   // do the manipulation inline here.
   op->walk([&](scf::ForOp forOp) {
     for (auto &op : forOp.getOps()) {
       for (auto result : op.getOperands()) {
+        // Skip block args
+        if (!result.getDefiningOp()) {
+          continue;
+        }
+
         if (dependence_graph.find(result) == dependence_graph.end()) {
           dependence_graph[result] = llvm::DenseSet<mlir::Value>();
         }
 
         for (auto user : result.getUsers()) {
           for (auto userResult : user->getResults()) {
+            // Skip block args
+            if (!result.getDefiningOp()) {
+              continue;
+            }
             dependence_graph[result].insert(userResult);
           }
         }
@@ -153,8 +163,14 @@ int main(int argc, char **argv) {
         // TODO: Make sure there aren't any other backedges
         if (op.getName().getStringRef() == "scf.yield") {
           mlir::Value yield_var = op.getOperand(0);
-          mlir::Value loop_carried_var = forOp.getRegionIterArg(0);
-          dependence_graph[yield_var].insert(loop_carried_var);
+          mlir::Value loop_carried_var = forOp.getRegionIterArg(0); // arg4
+          for (auto user : loop_carried_var.getUsers()) {
+            for (auto result : user->getResults()) {
+              // Add backedge to first use only
+              dependence_graph[yield_var].insert(result);
+              break;
+            }
+          }
         }
       }
     }
