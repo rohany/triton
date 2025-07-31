@@ -45,7 +45,13 @@ std::string node_name(const mlir::Value &value, mlir::AsmState &asm_state) {
   std::string str;
   llvm::raw_string_ostream os(str);
   value.printAsOperand(os, asm_state);
-  std::string result = os.str();
+  if (auto defOp = value.getDefiningOp()) {
+    auto producer = defOp->getName();
+    os << "_" << producer << " ";
+  } else {
+    os << "_blockarg ";
+  }
+  std::string result = "\"" + os.str() + "\"";
   return result;
 }
 
@@ -128,7 +134,6 @@ int main(int argc, char **argv) {
       std::make_unique<HopperCostEstimator>();
 
   llvm::DenseMap<mlir::Value, llvm::DenseSet<mlir::Value>> dependence_graph;
-
   // We now have op, which is an mlir::ModuleOp. As part of a normal
   // compiler, this logic would be extracted into a pass, but we can
   // do the manipulation inline here.
@@ -143,6 +148,13 @@ int main(int argc, char **argv) {
           for (auto userResult : user->getResults()) {
             dependence_graph[result].insert(userResult);
           }
+        }
+
+        // TODO: Make sure there aren't any other backedges
+        if (op.getName().getStringRef() == "scf.yield") {
+          mlir::Value yield_var = op.getOperand(0);
+          mlir::Value loop_carried_var = forOp.getRegionIterArg(0);
+          dependence_graph[yield_var].insert(loop_carried_var);
         }
       }
     }
