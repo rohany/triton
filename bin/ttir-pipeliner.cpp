@@ -141,8 +141,11 @@ int main(int argc, char **argv) {
   op->walk([&](scf::ForOp forOp) {
     for (auto &op : forOp.getOps()) {
       for (auto result : op.getOperands()) {
-        // Skip block args
+        // Skip block args and compile-time constants
         if (!result.getDefiningOp()) {
+          continue;
+        } else if (result.getDefiningOp()->getName().getStringRef() ==
+                   "arith.constant") {
           continue;
         }
 
@@ -163,7 +166,7 @@ int main(int argc, char **argv) {
         // TODO: Make sure there aren't any other backedges
         if (op.getName().getStringRef() == "scf.yield") {
           mlir::Value yield_var = op.getOperand(0);
-          mlir::Value loop_carried_var = forOp.getRegionIterArg(0); // arg4
+          mlir::Value loop_carried_var = forOp.getRegionIterArg(0);
           for (auto user : loop_carried_var.getUsers()) {
             for (auto result : user->getResults()) {
               // Add backedge to first use only
