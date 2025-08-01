@@ -41,6 +41,40 @@ public:
   }
 };
 
+class EdgeData {
+public:
+  size_t delta;
+  size_t d;
+  EdgeData() {};
+  EdgeData(size_t delta, size_t d) : delta(delta), d(d) {}
+};
+
+namespace llvm {
+template <> struct DenseMapInfo<EdgeData> {
+  static inline EdgeData getEmptyKey() {
+    EdgeData key;
+    key.delta = ~0ULL;
+    key.d = ~0ULL;
+    return key;
+  }
+
+  static inline EdgeData getTombstoneKey() {
+    EdgeData key;
+    key.delta = ~0ULL - 1;
+    key.d = ~0ULL - 1;
+    return key;
+  }
+
+  static unsigned getHashValue(const EdgeData &val) {
+    return hash_combine(hash_value(val.delta), hash_value(val.d));
+  }
+
+  static bool isEqual(const EdgeData &lhs, const EdgeData &rhs) {
+    return lhs.delta == rhs.delta && lhs.d == rhs.d;
+  }
+};
+} // namespace llvm
+
 std::string node_name(const mlir::Value &value, mlir::AsmState &asm_state) {
   std::string str;
   llvm::raw_string_ostream os(str);
@@ -51,19 +85,29 @@ std::string node_name(const mlir::Value &value, mlir::AsmState &asm_state) {
   } else {
     os << "_blockarg ";
   }
-  std::string result = "\"" + os.str() + "\"";
-  return result;
+  auto name = os.str();
+  // Remove the % sign
+  name = name.substr(1);
+  return "\"" + name + "\"";
+}
+
+std::string node_label(const EdgeData &ed) {
+  return "\"(" + std::to_string(ed.delta) + ", " + std::to_string(ed.d) + ")\"";
 }
 
 void dump_dot_graph(
-    llvm::DenseMap<mlir::Value, llvm::DenseSet<mlir::Value>> &dependence_graph,
+    llvm::DenseMap<mlir::Value,
+                   llvm::DenseSet<std::pair<mlir::Value, EdgeData>>>
+        &dependence_graph,
     mlir::AsmState &asm_state) {
 
   std::cout << "digraph G {" << std::endl;
   for (const auto &[source, sinks] : dependence_graph) {
     for (const auto &sink : sinks) {
       std::cout << node_name(source, asm_state) << " -> "
-                << node_name(sink, asm_state) << ";\n";
+                << node_name(sink.first, asm_state)
+                << " [ label = " << node_label(sink.second) << " ] "
+                << ";\n";
     }
   }
   std::cout << "}" << std::endl;
@@ -133,7 +177,8 @@ int main(int argc, char **argv) {
   std::unique_ptr<InstCostEstimator> estimator =
       std::make_unique<HopperCostEstimator>();
 
-  llvm::DenseMap<mlir::Value, llvm::DenseSet<mlir::Value>> dependence_graph;
+  llvm::DenseMap<mlir::Value, llvm::DenseSet<std::pair<mlir::Value, EdgeData>>>
+      dependence_graph;
 
   // We now have op, which is an mlir::ModuleOp. As part of a normal
   // compiler, this logic would be extracted into a pass, but we can
@@ -150,7 +195,8 @@ int main(int argc, char **argv) {
         }
 
         if (dependence_graph.find(result) == dependence_graph.end()) {
-          dependence_graph[result] = llvm::DenseSet<mlir::Value>();
+          dependence_graph[result] =
+              llvm::DenseSet<std::pair<mlir::Value, EdgeData>>();
         }
 
         for (auto user : result.getUsers()) {
@@ -159,11 +205,12 @@ int main(int argc, char **argv) {
             if (!result.getDefiningOp()) {
               continue;
             }
-            dependence_graph[result].insert(userResult);
+            EdgeData ed = EdgeData(0, 1);
+            dependence_graph[result].insert(std::make_pair(userResult, ed));
           }
         }
 
-        // TODO: Make sure there aren't any other backedges
+        // Add backedges
         if (op.getName().getStringRef() == "scf.yield") {
           auto yield_idx = 0;
           for (auto yield_var : op.getOperands()) {
@@ -171,7 +218,8 @@ int main(int argc, char **argv) {
             for (auto user : loop_carried_var.getUsers()) {
               for (auto result : user->getResults()) {
                 // Add backedge to first use only
-                dependence_graph[yield_var].insert(result);
+                EdgeData ed = EdgeData(1, 1);
+                dependence_graph[yield_var].insert(std::make_pair(result, ed));
                 break;
               }
             }
