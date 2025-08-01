@@ -10,6 +10,7 @@
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/ToolOutputFile.h"
 
+#include <cmath>
 #include <iostream>
 #include <memory>
 
@@ -203,6 +204,72 @@ public:
   }
 };
 
+// The goal of this heuristic function is to normalize operation costs
+// into as small atomic units as possible to assist the software pipeliner
+// in finding compact schedules. Intuitively, we want to
+// 1) Round down "small" costs to zero, however we can't do this if there
+//    are "enough" small operations that add up to the cost of a larger
+//    operation.
+// 2) Normalize large costs into small multiples of each other that preserve
+//    the relative ratios between the original costs.
+// 3) Do this all while letting the resulting operations have small
+//    LCM's.
+void normalize_costs(llvm::DenseMap<mlir::Operation *, int64_t> &costs) {
+  // Initial normalization: round operations into their closest OOM.
+  for (auto &it : costs) {
+    if (it.second == 0)
+      continue;
+    double cost = it.second;
+    // Compute the division factor.
+    double oom = std::floor(log10(cost));
+    double base = pow(10.0, oom);
+    // Find multiple to scale onto.
+    double mult = round(cost / base);
+    it.second = mult * base;
+  }
+
+  // Bucket operations by order of magnitude.
+  int64_t largest_bucket = -1;
+  llvm::SmallMapVector<int64_t, int64_t, 4> buckets;
+  for (auto &it : costs) {
+    int64_t bucket = it.second == 0 ? 0 : int64_t(log10(it.second));
+    buckets[bucket] += it.second;
+    largest_bucket = std::max(largest_bucket, bucket);
+  }
+
+  // If all operations in a bucket don't add up to joining the
+  // order of magnitude of the largest bucket, remap those costs
+  // to zero.
+  llvm::SmallSet<int64_t, 4> zeroed_buckets;
+  for (auto &it : buckets) {
+    if (it.first == largest_bucket)
+      continue;
+    int64_t bucket_sum = int64_t(log10(it.second));
+    if (bucket_sum < largest_bucket) {
+      zeroed_buckets.insert(it.first);
+    }
+  }
+  // Zero out the costs of all operations in zeroed buckets.
+  for (auto &it : costs) {
+    int64_t bucket = it.second == 0 ? 0 : int64_t(log10(it.second));
+    if (zeroed_buckets.contains(bucket)) {
+      it.second = 0;
+    }
+  }
+
+  // Scale everything down by the smallest, non-zero bucket.
+  int64_t smallest_bucket = std::numeric_limits<int64_t>::max();
+  for (auto &it : costs) {
+    if (it.second == 0)
+      continue;
+    int64_t bucket = int64_t(log10(it.second));
+    smallest_bucket = std::min(smallest_bucket, bucket);
+  }
+  for (auto &it : costs) {
+    it.second = it.second / int64_t(pow(10.0, smallest_bucket));
+  }
+}
+
 int main(int argc, char **argv) {
   // Parse our command line operations.
   static cl::opt<std::string> inputFilename(cl::Positional,
@@ -271,18 +338,23 @@ int main(int argc, char **argv) {
   // compiler, this logic would be extracted into a pass, but we can
   // do the manipulation inline here.
   op->walk([&](scf::ForOp forOp) {
-    // Dump the for loop.
-    // forOp->dump();
+    // Estimate the costs of each operation within the body
+    // of the loop.
+    llvm::DenseMap<mlir::Operation *, int64_t> op_costs;
+    for (auto &op : forOp.getOps()) {
+      if (!llvm::isa<scf::YieldOp>(op)) {
+        op_costs[&op] = estimator->cost(&op);
+      }
+    }
+    normalize_costs(op_costs);
+    llvm::outs() << "Post cost normalization.\n";
+    for (auto& it : op_costs) {
+      llvm::outs() << it.first->getName().getStringRef() << " ==> " << it.second << "\n";
+    }
 
     // Iterate through all operations in the for loop.
     for (auto &op : forOp.getOps()) {
       // op.dump();
-
-      // Test that enough cases in the cost estimator are handled.
-      if (!llvm::isa<scf::YieldOp>(op)) {
-        auto cost = estimator->cost(&op);
-        llvm::outs() << op.getName().getStringRef() << " ==> " << cost << "\n";
-      }
     }
   });
 
